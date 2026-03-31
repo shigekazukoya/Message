@@ -20,6 +20,7 @@ public static class DiagnosticsLogger
     private const int GR_USEROBJECTS_PEAK = 4;
     private const int UOI_HEAPSIZE = 5;
     private const int ErrorNotEnoughQuota = 1816;
+    private const int CommitPressureThresholdPercent = 95;
 
     // レジストリに明示値がない場合の一般的な既定値として扱う
     private const int DefaultGdiProcessHandleQuota = 10000;
@@ -184,7 +185,7 @@ public static class DiagnosticsLogger
         if (probe.UserQuota > 0 && probe.UserObjects * 100 / probe.UserQuota >= 80)
             findings.Add($"USER 枯渇候補 {probe.UserObjects}/{probe.UserQuota}");
 
-        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= 85)
+        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
             findings.Add($"Commit 圧迫 {probe.CommitTotalMB}/{probe.CommitLimitMB}MB ({probe.CommitUsagePercent}%)");
 
         if (probe.AvailablePhysicalMB is > 0 and < 512)
@@ -215,7 +216,7 @@ public static class DiagnosticsLogger
         if (probe.UserQuota > 0 && probe.UserObjects * 100 / probe.UserQuota >= 80)
             return true;
 
-        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= 85)
+        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
             return true;
 
         if (probe.AvailablePhysicalMB is > 0 and < 512)
