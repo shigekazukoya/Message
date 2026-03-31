@@ -37,7 +37,8 @@
             <Separator/>
             <TextBlock Text="頻度閾値 (回/秒):" VerticalAlignment="Center" Margin="4,0"/>
             <TextBox x:Name="TxtThreshold" Text="100" Width="50" Margin="2,0"
-                     VerticalContentAlignment="Center"/>
+                     VerticalContentAlignment="Center"
+                     TextChanged="TxtThreshold_TextChanged"/>
         </ToolBar>
 
         <!-- ステータスバー -->

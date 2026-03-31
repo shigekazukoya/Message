@@ -86,6 +86,7 @@ public partial class MainWindow : Window
     private volatile int  _maxFrequency     = 0;
     private long          _windowStartTicks = DateTime.Now.Ticks;
     private volatile bool _warnActive       = false;
+    private volatile int  _threshold        = 100; // UIスレッドから書き、フックスレッドから読む
 
     // プロセス一覧
     private List<ProcessEntry> _allProcesses = new();
@@ -212,7 +213,7 @@ public partial class MainWindow : Window
             _currentFrequency = freq;
             if (freq > _maxFrequency)
                 _maxFrequency = freq;
-            _warnActive    = freq > GetThreshold();
+            _warnActive    = freq > _threshold;
             _countInWindow = 0;
             Interlocked.Exchange(ref _windowStartTicks, DateTime.Now.Ticks);
         }
@@ -357,10 +358,10 @@ public partial class MainWindow : Window
     // ─── ユーティリティ ──────────────────────────────────────
     private static string Now => DateTime.Now.ToString("HH:mm:ss.fff");
 
-    private int GetThreshold()
+    private void TxtThreshold_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (int.TryParse(TxtThreshold.Text, out int v) && v > 0) return v;
-        return 100;
+        if (int.TryParse(TxtThreshold.Text, out int v) && v > 0)
+            _threshold = v;
     }
 
     // ─── ボタンハンドラ ──────────────────────────────────────
