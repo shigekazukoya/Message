@@ -45,9 +45,36 @@ public partial class MainWindow : Window
         IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint   message;
+        public IntPtr wParam, lParam;
+        public uint   time;
+        public int    ptX, ptY;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint min, uint max);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref MSG lpmsg);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostThreadMessage(uint idThread, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    private const uint WM_QUIT = 0x0012;
+
     // ─── フィールド ───────────────────────────────────────────
-    private IntPtr           _winEventHook;
-    private WinEventDelegate? _winEventProc; // GC 防止
+    private Thread?  _hookThread;
+    private uint     _hookThreadId;
 
     private bool _monitoring = false;
 
@@ -77,16 +104,48 @@ public partial class MainWindow : Window
         LoadProcessList();
     }
 
-    // ─── SetWinEventHook ─────────────────────────────────────
+    // ─── SetWinEventHook（専用スレッドで Win32 メッセージループを回す） ───
     private void StartMonitoring(int pid)
     {
-        _winEventProc = OnWinEvent;
-        _winEventHook = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
-            IntPtr.Zero, _winEventProc,
-            (uint)pid, 0, WINEVENT_OUTOFCONTEXT);
+        var ready = new ManualResetEventSlim(false);
+        bool hookOk = false;
 
-        if (_winEventHook == IntPtr.Zero)
+        _hookThread = new Thread(() =>
+        {
+            // このスレッドの Win32 スレッド ID を記録
+            _hookThreadId = GetCurrentThreadId();
+
+            // デリゲートをローカルに保持（GC 対策）
+            WinEventDelegate proc = OnWinEvent;
+
+            var hook = SetWinEventHook(
+                EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                IntPtr.Zero, proc,
+                (uint)pid, 0, WINEVENT_OUTOFCONTEXT);
+
+            hookOk = hook != IntPtr.Zero;
+            ready.Set(); // UI スレッドへ結果を通知
+
+            if (!hookOk) return;
+
+            // Win32 メッセージループ（WM_QUIT が来るまで回し続ける）
+            while (GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+
+            UnhookWinEvent(hook);
+        });
+
+        _hookThread.SetApartmentState(ApartmentState.STA);
+        _hookThread.IsBackground = true;
+        _hookThread.Start();
+
+        // フック結果を待機（最大 2 秒）
+        ready.Wait(TimeSpan.FromSeconds(2));
+
+        if (!hookOk)
         {
             AppendLog($"[{Now}] 【エラー】SetWinEventHook 失敗 (PID={pid})");
             return;
@@ -99,11 +158,13 @@ public partial class MainWindow : Window
 
     private void StopMonitoring()
     {
-        if (_winEventHook != IntPtr.Zero)
+        if (_hookThreadId != 0)
         {
-            UnhookWinEvent(_winEventHook);
-            _winEventHook = IntPtr.Zero;
-            _winEventProc = null;
+            // WM_QUIT をフックスレッドに送ってループを終了
+            PostThreadMessage(_hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            _hookThread?.Join(TimeSpan.FromSeconds(2));
+            _hookThreadId = 0;
+            _hookThread   = null;
         }
         _monitoring = false;
         AppendLog($"[{Now}] 監視停止");
