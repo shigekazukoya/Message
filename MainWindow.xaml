@@ -45,18 +45,30 @@
         <StatusBar DockPanel.Dock="Bottom">
             <StatusBarItem>
                 <StackPanel Orientation="Horizontal">
-                    <TextBlock Style="{StaticResource HeaderText}" Text="GDI:"/>
-                    <TextBlock x:Name="TxtGdi" Style="{StaticResource ValueText}" Text="0"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  USER:" Margin="8,0,4,0"/>
-                    <TextBlock x:Name="TxtUser" Style="{StaticResource ValueText}" Text="0"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  ハンドル:" Margin="8,0,4,0"/>
-                    <TextBlock x:Name="TxtHandles" Style="{StaticResource ValueText}" Text="0"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  WS:" Margin="8,0,4,0"/>
-                    <TextBlock x:Name="TxtWS" Style="{StaticResource ValueText}" Text="0 MB"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  RDP:" Margin="8,0,4,0"/>
-                    <TextBlock x:Name="TxtRdp" Style="{StaticResource ValueText}" Text="-"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  DWM:" Margin="8,0,4,0"/>
-                    <TextBlock x:Name="TxtDwm" Style="{StaticResource ValueText}" Text="-"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="GDI:"
+                               ToolTip="GDI オブジェクト数（ブラシ・ペン・フォント・DC など）&#x0a;増え続ける場合は GDI リークの疑い"/>
+                    <TextBlock x:Name="TxtGdi" Style="{StaticResource ValueText}" Text="0"
+                               ToolTip="GDI オブジェクト数（ブラシ・ペン・フォント・DC など）&#x0a;増え続ける場合は GDI リークの疑い"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  USER:" Margin="8,0,4,0"
+                               ToolTip="User オブジェクト数（ウィンドウ・メニュー・アイコンなど）&#x0a;増え続ける場合は User オブジェクトリークの疑い"/>
+                    <TextBlock x:Name="TxtUser" Style="{StaticResource ValueText}" Text="0"
+                               ToolTip="User オブジェクト数（ウィンドウ・メニュー・アイコンなど）&#x0a;増え続ける場合は User オブジェクトリークの疑い"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  ハンドル:" Margin="8,0,4,0"
+                               ToolTip="カーネルハンドル数（ファイル・イベント・スレッドなど）&#x0a;増え続ける場合はハンドルリークの疑い"/>
+                    <TextBlock x:Name="TxtHandles" Style="{StaticResource ValueText}" Text="0"
+                               ToolTip="カーネルハンドル数（ファイル・イベント・スレッドなど）&#x0a;増え続ける場合はハンドルリークの疑い"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  WS:" Margin="8,0,4,0"
+                               ToolTip="Working Set（物理メモリ使用量）&#x0a;RAM 上に実際に載っているページの合計&#x0a;増え続ける場合はメモリリークの疑い"/>
+                    <TextBlock x:Name="TxtWS" Style="{StaticResource ValueText}" Text="0 MB"
+                               ToolTip="Working Set（物理メモリ使用量）&#x0a;RAM 上に実際に載っているページの合計&#x0a;増え続ける場合はメモリリークの疑い"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  RDP:" Margin="8,0,4,0"
+                               ToolTip="リモートデスクトップ（RDP）セッションかどうか&#x0a;YES = リモート接続中"/>
+                    <TextBlock x:Name="TxtRdp" Style="{StaticResource ValueText}" Text="-"
+                               ToolTip="リモートデスクトップ（RDP）セッションかどうか&#x0a;YES = リモート接続中"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  DWM:" Margin="8,0,4,0"
+                               ToolTip="Desktop Window Manager が有効かどうか&#x0a;OFF の場合はウィンドウ合成が無効（レガシーモード）"/>
+                    <TextBlock x:Name="TxtDwm" Style="{StaticResource ValueText}" Text="-"
+                               ToolTip="Desktop Window Manager が有効かどうか&#x0a;OFF の場合はウィンドウ合成が無効（レガシーモード）"/>
                 </StackPanel>
             </StatusBarItem>
         </StatusBar>
