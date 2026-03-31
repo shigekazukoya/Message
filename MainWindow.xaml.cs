@@ -78,13 +78,13 @@ public partial class MainWindow : Window
 
     private bool _monitoring = false;
 
-    // 頻度監視
-    private int      _countInWindow    = 0;
-    private int      _totalCount       = 0;
-    private int      _currentFrequency = 0;
-    private int      _maxFrequency     = 0;
-    private DateTime _windowStart      = DateTime.Now;
-    private bool     _warnActive       = false;
+    // 頻度監視（フックスレッド・UIスレッド両方からアクセスするため Interlocked / volatile で保護）
+    private int           _countInWindow    = 0;
+    private int           _totalCount       = 0;
+    private volatile int  _currentFrequency = 0;
+    private volatile int  _maxFrequency     = 0;
+    private long          _windowStartTicks = DateTime.Now.Ticks;
+    private volatile bool _warnActive       = false;
 
     // プロセス一覧
     private List<ProcessEntry> _allProcesses = new();
@@ -195,21 +195,24 @@ public partial class MainWindow : Window
         Dispatcher.InvokeAsync(() => AppendLogEntry(entry));
     }
 
-    // ─── 頻度カウント ─────────────────────────────────────────
+    // ─── 頻度カウント（フックスレッドから呼ばれる） ──────────
     private void CountAndWarn()
     {
+        // _countInWindow / _totalCount はフックスレッドのみ書くので Interlocked 不要だが
+        // _currentFrequency / _maxFrequency は UI スレッドから読むため volatile で保護済み
         _countInWindow++;
-        _totalCount++;
+        Interlocked.Increment(ref _totalCount);
 
-        var elapsed = (DateTime.Now - _windowStart).TotalSeconds;
+        var elapsed = TimeSpan.FromTicks(DateTime.Now.Ticks - Interlocked.Read(ref _windowStartTicks)).TotalSeconds;
         if (elapsed >= 1.0)
         {
-            _currentFrequency = (int)(_countInWindow / elapsed);
-            if (_currentFrequency > _maxFrequency)
-                _maxFrequency = _currentFrequency;
-            _warnActive    = _currentFrequency > GetThreshold();
+            var freq = (int)(_countInWindow / elapsed);
+            _currentFrequency = freq;
+            if (freq > _maxFrequency)
+                _maxFrequency = freq;
+            _warnActive    = freq > GetThreshold();
             _countInWindow = 0;
-            _windowStart   = DateTime.Now;
+            Interlocked.Exchange(ref _windowStartTicks, DateTime.Now.Ticks);
         }
     }
 
@@ -314,7 +317,7 @@ public partial class MainWindow : Window
         TxtWS.Text      = $"{proc.WorkingSet64 / 1024 / 1024} MB";
         TxtRdp.Text     = System.Windows.Forms.SystemInformation.TerminalServerSession ? "YES" : "NO";
 
-        TxtTotalCount.Text   = _totalCount.ToString();
+        TxtTotalCount.Text   = Volatile.Read(ref _totalCount).ToString();
         TxtFrequency.Text    = _currentFrequency.ToString();
         TxtMaxFrequency.Text = _maxFrequency.ToString();
 
@@ -364,9 +367,10 @@ public partial class MainWindow : Window
 
     private void BtnResetStats_Click(object sender, RoutedEventArgs e)
     {
-        _totalCount = _countInWindow = _currentFrequency = _maxFrequency = 0;
-        _windowStart = DateTime.Now;
-        _warnActive  = false;
+        Interlocked.Exchange(ref _totalCount, 0);
+        _countInWindow = _currentFrequency = _maxFrequency = 0;
+        Interlocked.Exchange(ref _windowStartTicks, DateTime.Now.Ticks);
+        _warnActive = false;
     }
 
     private void BtnExportLog_Click(object sender, RoutedEventArgs e)
