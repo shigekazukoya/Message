@@ -106,6 +106,10 @@ public partial class MainWindow : Window
     // 遅延警告スロットル（フックスレッド専用）
     private long _lastLagWarnTicks = 0;
 
+    // クォータ診断ログのスロットル（UIスレッド専用）
+    private long   _lastQuotaWarnTicks = 0;
+    private string _lastQuotaWarning   = "";
+
     // フィルタ状態（UIスレッドのみ）
     private bool _filterSystem         = true;
     private bool _filterLocationChange = true;
@@ -207,6 +211,7 @@ public partial class MainWindow : Window
         }
         _monitoring = false;
         _targetPid  = 0;
+        ResetQuotaUI();
         AppendLog($"[{Now}] 監視停止");
         UpdateMonitorUI(false);
     }
@@ -435,27 +440,41 @@ public partial class MainWindow : Window
         {
             try
             {
-                using var target = Process.GetProcessById(_targetPid);
-                target.Refresh();
-                TxtGdi.Text     = DiagnosticsLogger.GetGuiResources(target.Handle, 0).ToString();
-                TxtUser.Text    = DiagnosticsLogger.GetGuiResources(target.Handle, 1).ToString();
-                TxtHandles.Text = target.HandleCount.ToString();
-                TxtWS.Text      = $"{target.WorkingSet64 / 1024 / 1024} MB";
+                var probe = DiagnosticsLogger.TryTakeQuotaProbe(_targetPid)
+                    ?? throw new InvalidOperationException("quota probe unavailable");
+
+                TxtGdi.Text     = probe.GdiObjects.ToString();
+                TxtUser.Text    = probe.UserObjects.ToString();
+                TxtHandles.Text = probe.HandleCount.ToString();
+                TxtWS.Text      = $"{probe.WorkingSetMB} MB";
+
+                TxtPrivate.Text      = $"{probe.PrivateUsageMB} MB";
+                TxtPagedPool.Text    = $"{probe.PagedPoolUsageMB} MB";
+                TxtNonPagedPool.Text = $"{probe.NonPagedPoolUsageMB} MB";
+                TxtThreads.Text      = probe.ThreadCount.ToString();
+                TxtGuiQuota.Text =
+                    $"GDI {probe.GdiObjects}/{probe.GdiPeakObjects}/{probe.GdiQuota}{(probe.GdiQuotaIsDefault ? "*" : "")}  " +
+                    $"USER {probe.UserObjects}/{probe.UserPeakObjects}/{probe.UserQuota}{(probe.UserQuotaIsDefault ? "*" : "")}";
+                TxtCommit.Text      = $"{probe.CommitTotalMB}/{probe.CommitLimitMB} MB ({probe.CommitUsagePercent}%)";
+                TxtAvailPhys.Text   = $"{probe.AvailablePhysicalMB} MB";
+                TxtKernelPool.Text  = $"P {probe.KernelPagedMB} MB / NP {probe.KernelNonPagedMB} MB";
+                TxtSessionGui.Text  = $"GDI {probe.SessionGdiObjects} / USER {probe.SessionUserObjects}";
+                TxtDesktopHeap.Text =
+                    $"{probe.CurrentDesktopHeapKB} KB  cfg={probe.SharedSectionKB},{probe.InteractiveDesktopHeapKB},{probe.NonInteractiveDesktopHeapKB}";
+                TxtQuotaDiagnosis.Text       = probe.DiagnosisSummary;
+                TxtQuotaDiagnosis.Foreground = probe.HasPressure ? WpfBrushes.OrangeRed : WpfBrushes.DarkSlateGray;
+                MaybeLogQuotaWarning(probe);
             }
             catch
             {
-                TxtGdi.Text     = "-";
-                TxtUser.Text    = "-";
-                TxtHandles.Text = "-";
-                TxtWS.Text      = "-";
+                TxtGdi.Text = TxtUser.Text = TxtHandles.Text = TxtWS.Text = "-";
+                ResetQuotaUI();
             }
         }
         else
         {
-            TxtGdi.Text     = "-";
-            TxtUser.Text    = "-";
-            TxtHandles.Text = "-";
-            TxtWS.Text      = "-";
+            TxtGdi.Text = TxtUser.Text = TxtHandles.Text = TxtWS.Text = "-";
+            ResetQuotaUI();
         }
         TxtRdp.Text     = System.Windows.Forms.SystemInformation.TerminalServerSession ? "YES" : "NO";
         TxtDwm.Text     = DiagnosticsLogger.GetDwmEnabled() ? "ON" : "OFF";
@@ -486,6 +505,40 @@ public partial class MainWindow : Window
         {
             TxtWarning.Text = "";
         }
+    }
+
+    private void ResetQuotaUI()
+    {
+        _lastQuotaWarnTicks = 0;
+        _lastQuotaWarning   = "";
+        TxtPrivate.Text        = "-";
+        TxtPagedPool.Text      = "-";
+        TxtNonPagedPool.Text   = "-";
+        TxtThreads.Text        = "-";
+        TxtGuiQuota.Text       = "-";
+        TxtCommit.Text         = "-";
+        TxtAvailPhys.Text      = "-";
+        TxtKernelPool.Text     = "-";
+        TxtSessionGui.Text     = "-";
+        TxtDesktopHeap.Text    = "-";
+        TxtQuotaDiagnosis.Text = "-";
+        TxtQuotaDiagnosis.Foreground = WpfBrushes.Black;
+    }
+
+    private void MaybeLogQuotaWarning(QuotaProbe probe)
+    {
+        if (!probe.HasPressure)
+            return;
+
+        var nowTicks = DateTime.Now.Ticks;
+        var changed = !string.Equals(_lastQuotaWarning, probe.DiagnosisSummary, StringComparison.Ordinal);
+        if (!changed && TimeSpan.FromTicks(nowTicks - _lastQuotaWarnTicks).TotalSeconds < 5.0)
+            return;
+
+        _lastQuotaWarnTicks = nowTicks;
+        _lastQuotaWarning   = probe.DiagnosisSummary;
+        AppendLog(
+            $"[{Now}] [クォータ診断] {probe.DiagnosisSummary}  {DiagnosticsLogger.FormatQuotaSummary(probe)}");
     }
 
     // ─── ログ ─────────────────────────────────────────────────
