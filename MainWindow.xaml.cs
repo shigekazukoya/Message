@@ -20,9 +20,6 @@ public partial class MainWindow : Window
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
-    [DllImport("user32.dll")]
-    private static extern int GetGuiResources(IntPtr hProcess, int uiFlags);
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetWinEventHook(
         uint eventMin, uint eventMax, IntPtr hmodWinEventProc,
@@ -104,6 +101,21 @@ public partial class MainWindow : Window
         _statusTimer.Start();
 
         LoadProcessList();
+        InitGpuInfo();
+    }
+
+    private void InitGpuInfo()
+    {
+        TxtGpuInfo.Text = "取得中...";
+        Task.Run(DiagnosticsLogger.QueryGpuInfos).ContinueWith(t =>
+        {
+            var gpus = t.Result;
+            var text = gpus.Length == 0
+                ? "(取得失敗)"
+                : string.Join("  /  ", gpus.Select(g =>
+                    $"{g.Name}  driver={g.DriverVersion}  ({g.DriverDate})"));
+            Dispatcher.InvokeAsync(() => TxtGpuInfo.Text = text);
+        });
     }
 
     // ─── SetWinEventHook（専用スレッドで Win32 メッセージループを回す） ───
@@ -243,6 +255,28 @@ public partial class MainWindow : Window
         CmbProcess.SelectedIndex = filtered.Count > 0 ? 0 : -1;
     }
 
+    // ─── TDR ログ確認 ────────────────────────────────────────
+    private void BtnCheckTdr_Click(object sender, RoutedEventArgs e)
+    {
+        ListTdr.Items.Clear();
+        ListTdr.Visibility = Visibility.Visible;
+
+        var events = DiagnosticsLogger.QueryRecentTdrEvents();
+        if (events.Length == 0)
+        {
+            ListTdr.Items.Add("(直近件に TDR 関連イベントなし: nvlddmkm / atikmdag / igfx / dxgkrnl / Display)");
+            return;
+        }
+
+        foreach (var ev in events)
+        {
+            ListTdr.Items.Add(
+                $"[{ev.Time:yyyy-MM-dd HH:mm:ss}] [{ev.EntryType}] {ev.Source}: {ev.Message}");
+        }
+
+        AppendLog($"[{Now}] TDR イベント {events.Length} 件を取得");
+    }
+
     // ─── UI イベントハンドラ ─────────────────────────────────
     private void BtnRefresh_Click(object sender, RoutedEventArgs e)
     {
@@ -314,11 +348,12 @@ public partial class MainWindow : Window
         using var proc = Process.GetCurrentProcess();
         proc.Refresh();
 
-        TxtGdi.Text     = GetGuiResources(proc.Handle, 0).ToString();
-        TxtUser.Text    = GetGuiResources(proc.Handle, 1).ToString();
+        TxtGdi.Text     = DiagnosticsLogger.GetGuiResources(proc.Handle, 0).ToString();
+        TxtUser.Text    = DiagnosticsLogger.GetGuiResources(proc.Handle, 1).ToString();
         TxtHandles.Text = proc.HandleCount.ToString();
         TxtWS.Text      = $"{proc.WorkingSet64 / 1024 / 1024} MB";
         TxtRdp.Text     = System.Windows.Forms.SystemInformation.TerminalServerSession ? "YES" : "NO";
+        TxtDwm.Text     = DiagnosticsLogger.GetDwmEnabled() ? "ON" : "OFF";
 
         TxtTotalCount.Text   = Volatile.Read(ref _totalCount).ToString();
         TxtFrequency.Text    = _currentFrequency.ToString();
