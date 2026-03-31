@@ -1,0 +1,135 @@
+<Window x:Class="MessageHookTool.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WPF メッセージフック モニター" Height="680" Width="1000"
+        MinWidth="700" MinHeight="500">
+    <Window.Resources>
+        <Style x:Key="HeaderText" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="ValueText" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="MinWidth" Value="50"/>
+        </Style>
+        <Style x:Key="WarnText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="OrangeRed"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel LastChildFill="True">
+
+        <!-- ツールバー -->
+        <ToolBar DockPanel.Dock="Top" Margin="2">
+            <Button x:Name="BtnClearLog" Content="ログをクリア" Padding="8,3" Margin="2,0"
+                    Click="BtnClearLog_Click"/>
+            <Button x:Name="BtnExportLog" Content="ログをエクスポート" Padding="8,3" Margin="2,0"
+                    Click="BtnExportLog_Click"/>
+            <Separator/>
+            <CheckBox x:Name="ChkAutoScroll" Content="自動スクロール" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"/>
+            <Separator/>
+            <CheckBox x:Name="ChkWriteFile" Content="ファイルにも保存" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"/>
+            <Separator/>
+            <TextBlock Text="頻度閾値 (回/秒):" VerticalAlignment="Center" Margin="4,0"/>
+            <TextBox x:Name="TxtThreshold" Text="100" Width="50" Margin="2,0"
+                     VerticalContentAlignment="Center"/>
+        </ToolBar>
+
+        <!-- ステータスバー -->
+        <StatusBar DockPanel.Dock="Bottom">
+            <StatusBarItem>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource HeaderText}" Text="GDI:"/>
+                    <TextBlock x:Name="TxtGdi" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  USER:" Margin="8,0,4,0"/>
+                    <TextBlock x:Name="TxtUser" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  ハンドル:" Margin="8,0,4,0"/>
+                    <TextBlock x:Name="TxtHandles" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  WS:" Margin="8,0,4,0"/>
+                    <TextBlock x:Name="TxtWS" Style="{StaticResource ValueText}" Text="0 MB"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  RDP:" Margin="8,0,4,0"/>
+                    <TextBlock x:Name="TxtRdp" Style="{StaticResource ValueText}" Text="-"/>
+                </StackPanel>
+            </StatusBarItem>
+        </StatusBar>
+
+        <!-- メインコンテンツ -->
+        <Grid Margin="4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="160"/>
+            </Grid.RowDefinitions>
+
+            <!-- 監視対象プロセス選択 -->
+            <GroupBox Grid.Row="0" Header="監視対象プロセス" Margin="0,0,0,4">
+                <Grid Margin="4,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="320"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0" Text="プロセス:" Style="{StaticResource HeaderText}"/>
+                    <ComboBox x:Name="CmbProcess" Grid.Column="1"
+                              Margin="0,0,4,0" DisplayMemberPath="DisplayName"
+                              SelectionChanged="CmbProcess_SelectionChanged"/>
+                    <TextBox x:Name="TxtProcessFilter" Grid.Column="2"
+                             Margin="4,0" VerticalContentAlignment="Center"
+                             TextChanged="TxtProcessFilter_TextChanged"
+                             ToolTip="プロセス名・タイトル・PID でフィルタ"/>
+                    <Button x:Name="BtnRefresh" Grid.Column="3" Content="一覧を更新"
+                            Padding="8,3" Margin="4,0" Click="BtnRefresh_Click"/>
+                    <Separator Grid.Column="4" Margin="4,0"/>
+                    <Button x:Name="BtnStartStop" Grid.Column="5" Content="監視開始"
+                            Padding="8,3" Margin="4,0" Width="80"
+                            Click="BtnStartStop_Click"
+                            Background="MediumSeaGreen" Foreground="White" FontWeight="Bold"/>
+                </Grid>
+            </GroupBox>
+
+            <!-- 統計パネル -->
+            <GroupBox Grid.Row="1" Header="EVENT_OBJECT_LOCATIONCHANGE 統計" Margin="0,0,0,4">
+                <StackPanel Orientation="Horizontal" Margin="4,4">
+                    <TextBlock Style="{StaticResource HeaderText}" Text="累計:"/>
+                    <TextBlock x:Name="TxtTotalCount" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  現在の頻度 (回/秒):" Margin="16,0,4,0"/>
+                    <TextBlock x:Name="TxtFrequency" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  最大頻度 (回/秒):" Margin="16,0,4,0"/>
+                    <TextBlock x:Name="TxtMaxFrequency" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock x:Name="TxtWarning" Style="{StaticResource WarnText}"
+                               Text="" Margin="16,0,0,0" Visibility="Collapsed"/>
+                    <Button x:Name="BtnResetStats" Content="統計リセット" Padding="8,2"
+                            Margin="16,0,0,0" Click="BtnResetStats_Click"/>
+                </StackPanel>
+            </GroupBox>
+
+            <!-- イベントログ -->
+            <GroupBox Grid.Row="2" Header="イベントログ">
+                <ListBox x:Name="ListLog" FontFamily="Consolas" FontSize="11"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+            </GroupBox>
+
+            <GridSplitter Grid.Row="3" Height="4" HorizontalAlignment="Stretch" Margin="0,2"/>
+
+            <!-- 例外ログ -->
+            <GroupBox Grid.Row="4" Header="例外・診断ログ">
+                <ListBox x:Name="ListExceptions" FontFamily="Consolas" FontSize="11"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+            </GroupBox>
+        </Grid>
+    </DockPanel>
+</Window>
