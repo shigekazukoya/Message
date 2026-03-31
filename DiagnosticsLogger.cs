@@ -21,6 +21,15 @@ public static class DiagnosticsLogger
     private const int UOI_HEAPSIZE = 5;
     private const int ErrorNotEnoughQuota = 1816;
     private const int CommitPressureThresholdPercent = 95;
+    private const int GuiPressureThresholdPercent = 80;
+    private const int GuiCriticalThresholdPercent = 95;
+    private const long LowPhysicalMemoryThresholdMB = 512;
+    private const long CriticalPhysicalMemoryThresholdMB = 256;
+    private const long SuspiciousPagedPoolThresholdMB = 256;
+    private const long SuspiciousNonPagedPoolThresholdMB = 128;
+    private const int SuspiciousHandleCount = 20000;
+    private const int InvestigationTopCount = 6;
+    private const uint GA_ROOT = 2;
 
     // レジストリに明示値がない場合の一般的な既定値として扱う
     private const int DefaultGdiProcessHandleQuota = 10000;
@@ -52,6 +61,26 @@ public static class DiagnosticsLogger
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PROCESS_MEMORY_COUNTERS_EX
@@ -110,14 +139,20 @@ public static class DiagnosticsLogger
     public static DiagnosticsSnapshot TakeSnapshot(string source, Exception? ex = null)
     {
         using var proc = Process.GetCurrentProcess();
+        var nativeErrorCode = (ex as Win32Exception)?.NativeErrorCode;
+        var quotaProbe = TakeQuotaProbe(proc);
+
         return new DiagnosticsSnapshot
         {
             Timestamp        = DateTime.Now,
             Source           = source,
             ExceptionMessage = ex?.Message,
             StackTrace       = ex?.StackTrace,
-            NativeErrorCode  = (ex as Win32Exception)?.NativeErrorCode,
-            QuotaProbe       = TakeQuotaProbe(proc),
+            NativeErrorCode  = nativeErrorCode,
+            QuotaProbe       = quotaProbe,
+            Investigation    = nativeErrorCode == ErrorNotEnoughQuota
+                ? TakeInvestigation(quotaProbe, nativeErrorCode)
+                : null,
         };
     }
 
@@ -167,40 +202,43 @@ public static class DiagnosticsLogger
             NonInteractiveDesktopHeapKB = desktopHeap.NonInteractiveDesktopHeapKB,
         };
 
-        probe.DiagnosisSummary = BuildDiagnosis(probe, null);
+        var analysis = AnalyzeQuota(probe, null);
+        probe.DiagnosisSummary = analysis.Summary;
+        probe.LikelyMissingResource = analysis.MissingResource;
+        probe.RecommendedAction = analysis.Recommendation;
         probe.HasPressure = HasPressure(probe);
         return probe;
     }
 
+    public static QuotaInvestigation TakeInvestigation(int pid, int? nativeErrorCode = null)
+    {
+        var probe = TryTakeQuotaProbe(pid);
+        return TakeInvestigation(probe, nativeErrorCode);
+    }
+
+    private static QuotaInvestigation TakeInvestigation(QuotaProbe? probe, int? nativeErrorCode)
+    {
+        var analysis = AnalyzeQuota(probe, nativeErrorCode);
+        var windowInventory = probe != null
+            ? QueryWindowInventory(probe.ProcessId)
+            : new WindowInventory();
+        var wpfCauseHint = BuildWpfCauseHint(probe, windowInventory, nativeErrorCode);
+
+        return new QuotaInvestigation
+        {
+            FocusProcessId = probe?.ProcessId,
+            FocusProcessName = probe?.ProcessName,
+            MissingResource = analysis.MissingResource,
+            Summary = analysis.Summary,
+            Recommendation = analysis.Recommendation,
+            WindowInventory = windowInventory,
+            WpfCauseHint = wpfCauseHint,
+        };
+    }
+
     public static string BuildDiagnosis(QuotaProbe probe, int? nativeErrorCode)
     {
-        var findings = new List<string>();
-
-        if (nativeErrorCode == ErrorNotEnoughQuota)
-            findings.Add("1816(ERROR_NOT_ENOUGH_QUOTA)");
-
-        if (probe.GdiQuota > 0 && probe.GdiObjects * 100 / probe.GdiQuota >= 80)
-            findings.Add($"GDI 枯渇候補 {probe.GdiObjects}/{probe.GdiQuota}");
-
-        if (probe.UserQuota > 0 && probe.UserObjects * 100 / probe.UserQuota >= 80)
-            findings.Add($"USER 枯渇候補 {probe.UserObjects}/{probe.UserQuota}");
-
-        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
-            findings.Add($"Commit 圧迫 {probe.CommitTotalMB}/{probe.CommitLimitMB}MB ({probe.CommitUsagePercent}%)");
-
-        if (probe.AvailablePhysicalMB is > 0 and < 512)
-            findings.Add($"空き物理メモリ低下 {probe.AvailablePhysicalMB}MB");
-
-        if (findings.Count == 0 && nativeErrorCode == ErrorNotEnoughQuota)
-        {
-            findings.Add(
-                $"有力候補は desktop heap / kernel pool / commit。GDI={probe.GdiObjects}/{probe.GdiQuota}, USER={probe.UserObjects}/{probe.UserQuota}, Commit={probe.CommitUsagePercent}%");
-        }
-
-        if (findings.Count == 0)
-            return "顕著な quota 圧迫は未検出";
-
-        return string.Join(" / ", findings);
+        return AnalyzeQuota(probe, nativeErrorCode).Summary;
     }
 
     public static string FormatQuotaSummary(QuotaProbe probe) =>
@@ -210,19 +248,296 @@ public static class DiagnosticsLogger
 
     private static bool HasPressure(QuotaProbe probe)
     {
-        if (probe.GdiQuota > 0 && probe.GdiObjects * 100 / probe.GdiQuota >= 80)
+        if (probe.GdiQuota > 0 && probe.GdiObjects * 100 / probe.GdiQuota >= GuiPressureThresholdPercent)
             return true;
 
-        if (probe.UserQuota > 0 && probe.UserObjects * 100 / probe.UserQuota >= 80)
+        if (probe.UserQuota > 0 && probe.UserObjects * 100 / probe.UserQuota >= GuiPressureThresholdPercent)
             return true;
 
         if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
             return true;
 
-        if (probe.AvailablePhysicalMB is > 0 and < 512)
+        if (probe.AvailablePhysicalMB is > 0 and < LowPhysicalMemoryThresholdMB)
+            return true;
+
+        if (probe.PagedPoolUsageMB >= SuspiciousPagedPoolThresholdMB ||
+            probe.NonPagedPoolUsageMB >= SuspiciousNonPagedPoolThresholdMB)
+            return true;
+
+        if (probe.HandleCount >= SuspiciousHandleCount)
             return true;
 
         return false;
+    }
+
+    public static QuotaAnalysis AnalyzeQuota(QuotaProbe? probe, int? nativeErrorCode)
+    {
+        if (probe == null)
+        {
+            return nativeErrorCode == ErrorNotEnoughQuota
+                ? new QuotaAnalysis
+                {
+                    MissingResource = "desktop heap / kernel pool / commit",
+                    Summary = "1816(ERROR_NOT_ENOUGH_QUOTA) が発生しましたが、対象プロセスの採取に失敗しました",
+                Recommendation = "再現直前に原因スキャンを実行し、対象アプリの HWND 構成と Commit 使用率を採取してください",
+                }
+                : new QuotaAnalysis
+                {
+                    MissingResource = "不明",
+                    Summary = "クォータ情報を取得できませんでした",
+                Recommendation = "再現直前の採取有無と対象プロセスの取得権限を確認してください",
+                };
+        }
+
+        var findings = new List<string>();
+        var gdiPercent = probe.GdiQuota > 0 ? probe.GdiObjects * 100 / probe.GdiQuota : 0;
+        var userPercent = probe.UserQuota > 0 ? probe.UserObjects * 100 / probe.UserQuota : 0;
+
+        if (nativeErrorCode == ErrorNotEnoughQuota)
+            findings.Add("1816(ERROR_NOT_ENOUGH_QUOTA)");
+
+        if (gdiPercent >= GuiPressureThresholdPercent)
+            findings.Add($"GDI 枯渇候補 {probe.GdiObjects}/{probe.GdiQuota} ({gdiPercent}%)");
+
+        if (userPercent >= GuiPressureThresholdPercent)
+            findings.Add($"USER 枯渇候補 {probe.UserObjects}/{probe.UserQuota} ({userPercent}%)");
+
+        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
+            findings.Add($"Commit 圧迫 {probe.CommitTotalMB}/{probe.CommitLimitMB}MB ({probe.CommitUsagePercent}%)");
+
+        if (probe.AvailablePhysicalMB is > 0 and < LowPhysicalMemoryThresholdMB)
+            findings.Add($"空き物理メモリ低下 {probe.AvailablePhysicalMB}MB");
+
+        if (probe.PagedPoolUsageMB >= SuspiciousPagedPoolThresholdMB)
+            findings.Add($"Paged Pool 増大 {probe.PagedPoolUsageMB}MB");
+
+        if (probe.NonPagedPoolUsageMB >= SuspiciousNonPagedPoolThresholdMB)
+            findings.Add($"NonPaged Pool 増大 {probe.NonPagedPoolUsageMB}MB");
+
+        if (probe.HandleCount >= SuspiciousHandleCount)
+            findings.Add($"ハンドル増大 {probe.HandleCount}");
+
+        var summary = findings.Count == 0
+            ? "顕著な quota 圧迫は未検出"
+            : string.Join(" / ", findings);
+
+        if (probe.CommitLimitMB > 0 && probe.CommitUsagePercent >= CommitPressureThresholdPercent)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "Commit / ページファイル",
+                Summary = summary,
+                Recommendation = "対象アプリのメモリ増加とページファイル設定を確認してください",
+            };
+        }
+
+        if (gdiPercent >= GuiCriticalThresholdPercent && gdiPercent >= userPercent)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "GDI オブジェクト",
+                Summary = summary,
+                Recommendation = "WPF 単体より WinFormsHost / System.Drawing / Bitmap / Icon / HBITMAP 連携の解放漏れを疑ってください",
+            };
+        }
+
+        if (userPercent >= GuiCriticalThresholdPercent)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "USER オブジェクト",
+                Summary = summary,
+                Recommendation = "Window / Popup / ToolTip / ContextMenu / HwndSource / HwndHost の増殖を疑ってください",
+            };
+        }
+
+        if (probe.AvailablePhysicalMB is > 0 and < CriticalPhysicalMemoryThresholdMB)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "物理メモリ / Commit",
+                Summary = summary,
+                Recommendation = "対象アプリの Private Bytes 増加とページファイル不足を確認してください",
+            };
+        }
+
+        if (probe.PagedPoolUsageMB >= SuspiciousPagedPoolThresholdMB ||
+            probe.NonPagedPoolUsageMB >= SuspiciousNonPagedPoolThresholdMB)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "kernel pool",
+                Summary = summary,
+                Recommendation = "ドライバ由来の pool 枯渇やアプリ内 handle リークの可能性があります",
+            };
+        }
+
+        if (probe.HandleCount >= SuspiciousHandleCount)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "カーネルハンドル",
+                Summary = summary,
+                Recommendation = "対象アプリ内のファイル / イベント / スレッド handle リークを疑ってください",
+            };
+        }
+
+        if (gdiPercent >= GuiPressureThresholdPercent && gdiPercent >= userPercent)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "GDI オブジェクト",
+                Summary = summary,
+                Recommendation = "GDI 使用率が高めです。Bitmap / Icon / WinForms 連携のリーク有無を継続監視してください",
+            };
+        }
+
+        if (userPercent >= GuiPressureThresholdPercent)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "USER オブジェクト",
+                Summary = summary,
+                Recommendation = "USER 使用率が高めです。Window / Popup / ToolTip / ContextMenu の増加傾向を確認してください",
+            };
+        }
+
+        if (nativeErrorCode == ErrorNotEnoughQuota)
+        {
+            return new QuotaAnalysis
+            {
+                MissingResource = "desktop heap / kernel pool / commit",
+                Summary = summary == "顕著な quota 圧迫は未検出"
+                    ? $"1816(ERROR_NOT_ENOUGH_QUOTA)。GDI={probe.GdiObjects}/{probe.GdiQuota}, USER={probe.UserObjects}/{probe.UserQuota}, Commit={probe.CommitUsagePercent}%"
+                    : summary,
+                Recommendation = "GDI/USER が平常域なら desktop heap が有力です。WPF の隠し HWND や Popup/ToolTip/ContextMenu の増殖を確認してください",
+            };
+        }
+
+        return new QuotaAnalysis
+        {
+            MissingResource = "不足候補なし",
+            Summary = summary,
+            Recommendation = "再現直前に原因スキャンを実行し、対象アプリの HWND 構成を採取してください",
+        };
+    }
+
+    private static WindowInventory QueryWindowInventory(int pid)
+    {
+        var windows = new Dictionary<IntPtr, WindowSnapshot>();
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!BelongsToProcess(hWnd, pid))
+                return true;
+
+            AddWindowSnapshot(windows, hWnd, isTopLevel: true);
+            EnumChildWindows(hWnd, (child, _) =>
+            {
+                AddWindowSnapshot(windows, child, isTopLevel: false);
+                return true;
+            }, IntPtr.Zero);
+            return true;
+        }, IntPtr.Zero);
+
+        var allWindows = windows.Values.ToArray();
+        var classBuckets = allWindows
+            .GroupBy(x => x.ClassName, StringComparer.Ordinal)
+            .Select(g => new WindowClassSample
+            {
+                ClassName = g.Key,
+                Count = g.Count(),
+                VisibleCount = g.Count(x => x.IsVisible),
+                HiddenCount = g.Count(x => !x.IsVisible),
+                TopLevelCount = g.Count(x => x.IsTopLevel),
+            })
+            .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.ClassName, StringComparer.Ordinal)
+            .Take(InvestigationTopCount)
+            .ToArray();
+
+        return new WindowInventory
+        {
+            TotalWindows = allWindows.Length,
+            VisibleWindows = allWindows.Count(x => x.IsVisible),
+            HiddenWindows = allWindows.Count(x => !x.IsVisible),
+            TopLevelWindows = allWindows.Count(x => x.IsTopLevel),
+            HiddenTopLevelWindows = allWindows.Count(x => x.IsTopLevel && !x.IsVisible),
+            HwndWrapperCount = allWindows.Count(x => x.ClassName.StartsWith("HwndWrapper[", StringComparison.Ordinal)),
+            HiddenHwndWrapperCount = allWindows.Count(x =>
+                x.ClassName.StartsWith("HwndWrapper[", StringComparison.Ordinal) && !x.IsVisible),
+            WindowsFormsHostCount = allWindows.Count(x => x.ClassName.StartsWith("WindowsForms10.", StringComparison.Ordinal)),
+            WebViewHostCount = allWindows.Count(x =>
+                x.ClassName.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal) ||
+                x.ClassName.Contains("WebView", StringComparison.OrdinalIgnoreCase)),
+            TopClasses = classBuckets,
+        };
+    }
+
+    private static bool BelongsToProcess(IntPtr hWnd, int pid)
+    {
+        GetWindowThreadProcessId(hWnd, out uint windowPid);
+        return windowPid == (uint)pid;
+    }
+
+    private static void AddWindowSnapshot(Dictionary<IntPtr, WindowSnapshot> windows, IntPtr hWnd, bool isTopLevel)
+    {
+        if (hWnd == IntPtr.Zero || windows.ContainsKey(hWnd))
+            return;
+
+        windows[hWnd] = new WindowSnapshot
+        {
+            Handle = hWnd,
+            ClassName = GetClassNameSafe(hWnd),
+            IsVisible = IsWindowVisible(hWnd),
+            IsTopLevel = isTopLevel || GetAncestor(hWnd, GA_ROOT) == hWnd,
+        };
+    }
+
+    private static string GetClassNameSafe(IntPtr hWnd)
+    {
+        var sb = new StringBuilder(256);
+        return GetClassName(hWnd, sb, sb.Capacity) > 0
+            ? sb.ToString()
+            : "(unknown)";
+    }
+
+    private static string BuildWpfCauseHint(QuotaProbe? probe, WindowInventory inventory, int? nativeErrorCode)
+    {
+        if (probe == null)
+            return "対象プロセスの採取に失敗したため、WPF 固有の原因までは絞れていません";
+
+        var gdiPercent = probe.GdiQuota > 0 ? probe.GdiObjects * 100 / probe.GdiQuota : 0;
+        var userPercent = probe.UserQuota > 0 ? probe.UserObjects * 100 / probe.UserQuota : 0;
+
+        if (gdiPercent >= GuiPressureThresholdPercent)
+        {
+            return "GDI が高いため、純粋な WPF より WinFormsHost / System.Drawing / Icon / Bitmap / HBITMAP 連携の解放漏れが有力です";
+        }
+
+        if (userPercent >= GuiPressureThresholdPercent ||
+            inventory.HiddenTopLevelWindows >= 10 ||
+            inventory.HiddenHwndWrapperCount >= 10)
+        {
+            return "USER か隠し HWND が増えています。WPF の Window / Popup / ToolTip / ContextMenu / HwndSource / HwndHost の増殖が有力です";
+        }
+
+        if (inventory.WindowsFormsHostCount > 0)
+        {
+            return "WindowsFormsHost 系 HWND が見えます。WPF 単体より WinForms 連携側の Window / GDI / Handle 管理を疑ってください";
+        }
+
+        if (inventory.WebViewHostCount > 0)
+        {
+            return "WebView 系 HWND が見えます。WebView2 / Chromium ホストのウィンドウ増殖や破棄漏れも候補です";
+        }
+
+        if (nativeErrorCode == ErrorNotEnoughQuota)
+        {
+            return "WPF で 1816 かつ GDI/USER が平常なら desktop heap が有力です。隠し Window や一時 Popup の増殖を確認してください";
+        }
+
+        return "この時点では明確な WPF 固有原因は出ていません。再現直前の HWND 数とクラス内訳の変化を見てください";
     }
 
     private static PROCESS_MEMORY_COUNTERS_EX QueryProcessMemoryInfo(IntPtr hProcess)
@@ -401,7 +716,26 @@ public static class DiagnosticsLogger
             sb.AppendLine($"Kernel Pool (MB)  : paged={probe.KernelPagedMB} nonpaged={probe.KernelNonPagedMB}");
             sb.AppendLine($"Session GUI       : GDI={probe.SessionGdiObjects} USER={probe.SessionUserObjects}");
             sb.AppendLine($"Desktop Heap (KB) : current={probe.CurrentDesktopHeapKB} shared={probe.SharedSectionKB} interactive={probe.InteractiveDesktopHeapKB} noninteractive={probe.NonInteractiveDesktopHeapKB}");
+            sb.AppendLine($"Missing Resource  : {AnalyzeQuota(probe, snap.NativeErrorCode).MissingResource}");
             sb.AppendLine($"Diagnosis         : {BuildDiagnosis(probe, snap.NativeErrorCode)}");
+            sb.AppendLine($"Recommendation    : {AnalyzeQuota(probe, snap.NativeErrorCode).Recommendation}");
+        }
+
+        if (snap.Investigation != null)
+        {
+            var investigation = snap.Investigation;
+            sb.AppendLine("Investigation     :");
+            sb.AppendLine($"  Missing         : {investigation.MissingResource}");
+            sb.AppendLine($"  Summary         : {investigation.Summary}");
+            sb.AppendLine($"  Recommendation  : {investigation.Recommendation}");
+            sb.AppendLine($"  WPF Hint        : {investigation.WpfCauseHint}");
+            if (investigation.WindowInventory != null)
+            {
+                var inventory = investigation.WindowInventory;
+                sb.AppendLine($"  HWND            : total={inventory.TotalWindows} top={inventory.TopLevelWindows} visible={inventory.VisibleWindows} hidden={inventory.HiddenWindows} hiddenTop={inventory.HiddenTopLevelWindows}");
+                sb.AppendLine($"  WPF Classes     : HwndWrapper={inventory.HwndWrapperCount} hiddenHwndWrapper={inventory.HiddenHwndWrapperCount} WinForms={inventory.WindowsFormsHostCount} WebView={inventory.WebViewHostCount}");
+                sb.AppendLine($"  Top Classes     : {FormatWindowClasses(inventory.TopClasses)}");
+            }
         }
 
         sb.AppendLine();
@@ -426,11 +760,41 @@ public static class DiagnosticsLogger
             sb.Append($" | GDI={probe.GdiObjects}/{probe.GdiQuota} USER={probe.UserObjects}/{probe.UserQuota}");
             sb.Append($" | Private={probe.PrivateUsageMB}MB");
             sb.Append($" | Commit={probe.CommitUsagePercent}%");
+            sb.Append($" | 不足候補={AnalyzeQuota(probe, snap.NativeErrorCode).MissingResource}");
             sb.Append($" | {BuildDiagnosis(probe, snap.NativeErrorCode)}");
         }
 
         sb.Append($" | RDP={SystemInformation.TerminalServerSession} DWM={GetDwmEnabled()}");
         return sb.ToString();
+    }
+
+    public static string FormatInvestigationReport(QuotaInvestigation investigation)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"[{DateTime.Now:HH:mm:ss.fff}] 原因スキャン");
+        if (investigation.FocusProcessId.HasValue)
+            sb.AppendLine($"対象             : {investigation.FocusProcessName} ({investigation.FocusProcessId})");
+        sb.AppendLine($"不足候補         : {investigation.MissingResource}");
+        sb.AppendLine($"判定             : {investigation.Summary}");
+        sb.AppendLine($"次に見る点       : {investigation.Recommendation}");
+        sb.AppendLine($"WPF 観点         : {investigation.WpfCauseHint}");
+        if (investigation.WindowInventory != null)
+        {
+            var inventory = investigation.WindowInventory;
+            sb.AppendLine($"HWND             : total={inventory.TotalWindows} top={inventory.TopLevelWindows} visible={inventory.VisibleWindows} hidden={inventory.HiddenWindows} hiddenTop={inventory.HiddenTopLevelWindows}");
+            sb.AppendLine($"WPF クラス       : HwndWrapper={inventory.HwndWrapperCount} hiddenHwndWrapper={inventory.HiddenHwndWrapperCount} WinForms={inventory.WindowsFormsHostCount} WebView={inventory.WebViewHostCount}");
+            sb.AppendLine($"上位クラス       : {FormatWindowClasses(inventory.TopClasses)}");
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private static string FormatWindowClasses(IEnumerable<WindowClassSample> classes)
+    {
+        var entries = classes
+            .Select(sample =>
+                $"{sample.ClassName}={sample.Count}(top={sample.TopLevelCount}, hidden={sample.HiddenCount})")
+            .ToArray();
+        return entries.Length == 0 ? "(取得なし)" : string.Join(", ", entries);
     }
 }
 
@@ -442,6 +806,7 @@ public sealed class DiagnosticsSnapshot
     public string? StackTrace { get; set; }
     public int? NativeErrorCode { get; set; }
     public QuotaProbe? QuotaProbe { get; set; }
+    public QuotaInvestigation? Investigation { get; set; }
 }
 
 public sealed class QuotaProbe
@@ -476,7 +841,58 @@ public sealed class QuotaProbe
     public int InteractiveDesktopHeapKB { get; set; }
     public int NonInteractiveDesktopHeapKB { get; set; }
     public string DiagnosisSummary { get; set; } = "";
+    public string LikelyMissingResource { get; set; } = "";
+    public string RecommendedAction { get; set; } = "";
     public bool HasPressure { get; set; }
+}
+
+public sealed class QuotaAnalysis
+{
+    public string MissingResource { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public string Recommendation { get; set; } = "";
+}
+
+public sealed class QuotaInvestigation
+{
+    public int? FocusProcessId { get; set; }
+    public string? FocusProcessName { get; set; }
+    public string MissingResource { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public string Recommendation { get; set; } = "";
+    public string WpfCauseHint { get; set; } = "";
+    public WindowInventory? WindowInventory { get; set; }
+}
+
+public sealed class WindowInventory
+{
+    public int TotalWindows { get; set; }
+    public int VisibleWindows { get; set; }
+    public int HiddenWindows { get; set; }
+    public int TopLevelWindows { get; set; }
+    public int HiddenTopLevelWindows { get; set; }
+    public int HwndWrapperCount { get; set; }
+    public int HiddenHwndWrapperCount { get; set; }
+    public int WindowsFormsHostCount { get; set; }
+    public int WebViewHostCount { get; set; }
+    public WindowClassSample[] TopClasses { get; set; } = [];
+}
+
+public sealed class WindowClassSample
+{
+    public string ClassName { get; set; } = "";
+    public int Count { get; set; }
+    public int VisibleCount { get; set; }
+    public int HiddenCount { get; set; }
+    public int TopLevelCount { get; set; }
+}
+
+internal sealed class WindowSnapshot
+{
+    public IntPtr Handle { get; set; }
+    public string ClassName { get; set; } = "";
+    public bool IsVisible { get; set; }
+    public bool IsTopLevel { get; set; }
 }
 
 internal sealed class DesktopHeapInfo

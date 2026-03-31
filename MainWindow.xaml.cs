@@ -426,6 +426,9 @@ public partial class MainWindow : Window
                 Foreground = WpfBrushes.DarkRed,
                 FontWeight = WpfFontWeights.Bold,
                 Tag        = snap,
+                ToolTip    = snap.Investigation != null
+                    ? DiagnosticsLogger.FormatInvestigationReport(snap.Investigation)
+                    : null,
             };
             ListExceptions.Items.Add(item);
             if (ChkAutoScroll.IsChecked == true)
@@ -461,7 +464,8 @@ public partial class MainWindow : Window
                 TxtSessionGui.Text  = $"GDI {probe.SessionGdiObjects} / USER {probe.SessionUserObjects}";
                 TxtDesktopHeap.Text =
                     $"{probe.CurrentDesktopHeapKB} KB  cfg={probe.SharedSectionKB},{probe.InteractiveDesktopHeapKB},{probe.NonInteractiveDesktopHeapKB}";
-                TxtQuotaDiagnosis.Text       = probe.DiagnosisSummary;
+                TxtQuotaDiagnosis.Text       = probe.LikelyMissingResource;
+                TxtQuotaAdvice.Text          = probe.RecommendedAction;
                 TxtQuotaDiagnosis.Foreground = probe.HasPressure ? WpfBrushes.OrangeRed : WpfBrushes.DarkSlateGray;
                 MaybeLogQuotaWarning(probe);
             }
@@ -522,6 +526,7 @@ public partial class MainWindow : Window
         TxtSessionGui.Text     = "-";
         TxtDesktopHeap.Text    = "-";
         TxtQuotaDiagnosis.Text = "-";
+        TxtQuotaAdvice.Text    = "監視中または選択中のプロセスをスキャンできます";
         TxtQuotaDiagnosis.Foreground = WpfBrushes.Black;
     }
 
@@ -539,6 +544,64 @@ public partial class MainWindow : Window
         _lastQuotaWarning   = probe.DiagnosisSummary;
         AppendLog(
             $"[{Now}] [クォータ診断] {probe.DiagnosisSummary}  {DiagnosticsLogger.FormatQuotaSummary(probe)}");
+    }
+
+    private async void BtnQuotaScan_Click(object sender, RoutedEventArgs e)
+    {
+        var pid = ResolveDiagnosisTargetPid();
+        if (pid == 0)
+        {
+            WpfMessageBox.Show("監視中または選択中のプロセスを指定してください。",
+                "原因スキャン",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Warning);
+            return;
+        }
+
+        BtnQuotaScan.IsEnabled = false;
+        TxtQuotaAdvice.Text = "原因スキャンを実行中...";
+
+        try
+        {
+            var investigation = await Task.Run(() => DiagnosticsLogger.TakeInvestigation(pid));
+            TxtQuotaDiagnosis.Text = investigation.MissingResource;
+            TxtQuotaAdvice.Text = investigation.WpfCauseHint;
+
+            var report = DiagnosticsLogger.FormatInvestigationReport(investigation);
+            var item = new ListBoxItem
+            {
+                Content = report,
+                Foreground = WpfBrushes.DarkOrange,
+                FontWeight = WpfFontWeights.Bold,
+                ToolTip = report,
+            };
+
+            ListExceptions.Items.Add(item);
+            if (ChkAutoScroll.IsChecked == true)
+                ListExceptions.ScrollIntoView(item);
+
+            if (ChkWriteFile.IsChecked == true)
+                File.AppendAllText("diag.log", report + Environment.NewLine + Environment.NewLine);
+
+            AppendLog($"[{Now}] 原因スキャン完了  PID={pid}  不足候補={investigation.MissingResource}  WPF={investigation.WpfCauseHint}");
+        }
+        catch (Exception ex)
+        {
+            TxtQuotaAdvice.Text = "原因スキャンに失敗しました";
+            AppendLog($"[{Now}] 【エラー】原因スキャン失敗: {ex.Message}");
+        }
+        finally
+        {
+            BtnQuotaScan.IsEnabled = true;
+        }
+    }
+
+    private int ResolveDiagnosisTargetPid()
+    {
+        if (_targetPid != 0)
+            return _targetPid;
+
+        return CmbProcess.SelectedItem is ProcessEntry pe ? pe.Pid : 0;
     }
 
     // ─── ログ ─────────────────────────────────────────────────

@@ -169,6 +169,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <WrapPanel Grid.Row="0" Margin="0,0,0,4">
@@ -208,11 +209,19 @@
                         <TextBlock Style="{StaticResource HeaderText}" Text="  DesktopHeap:" Margin="16,0,4,0"/>
                         <TextBlock x:Name="TxtDesktopHeap" Style="{StaticResource ValueText}" Text="-"
                                    ToolTip="現在の desktop heap サイズと SharedSection 設定"/>
-                        <TextBlock Style="{StaticResource HeaderText}" Text="  判定:" Margin="16,0,4,0"/>
+                        <TextBlock Style="{StaticResource HeaderText}" Text="  不足候補:" Margin="16,0,4,0"/>
                         <TextBlock x:Name="TxtQuotaDiagnosis" Style="{StaticResource ValueText}" Text="-"
                                    TextWrapping="Wrap"
                                    ToolTip="1816(ERROR_NOT_ENOUGH_QUOTA) の候補原因要約"/>
                     </WrapPanel>
+
+                    <DockPanel Grid.Row="3" Margin="0,6,0,0" LastChildFill="True">
+                        <Button x:Name="BtnQuotaScan" Content="原因スキャン" Padding="8,2"
+                                Width="92" Click="BtnQuotaScan_Click"/>
+                        <TextBlock Style="{StaticResource HeaderText}" Text="  次に見る点:" Margin="12,0,4,0"/>
+                        <TextBlock x:Name="TxtQuotaAdvice" Style="{StaticResource ValueText}" Text="監視中または選択中のプロセスをスキャンできます"
+                                   TextWrapping="Wrap"/>
+                    </DockPanel>
                 </Grid>
             </GroupBox>
 
