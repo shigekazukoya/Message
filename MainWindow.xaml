@@ -60,11 +60,11 @@
                       VerticalAlignment="Center" Margin="4,0"
                       Click="ChkFilter_Click"
                       ToolTip="OBJECT_CREATE/DESTROY/SHOW/HIDE, SYSTEM_FOREGROUND, MOVESIZE など（青）"/>
-            <CheckBox x:Name="ChkFilterQueueStatus"
-                      Content="キュー状態" IsChecked="True"
+            <CheckBox x:Name="ChkFilterDelayWarning"
+                      Content="遅延警告" IsChecked="True"
                       VerticalAlignment="Center" Margin="4,0"
                       Click="ChkFilter_Click"
-                      ToolTip="UIディスパッチ待ちが50件を超えたときの警告（オレンジ太字）"/>
+                      ToolTip="WinEvent の配送遅延が閾値を超えたときの警告（オレンジ太字）"/>
         </ToolBar>
 
         <!-- ステータスバー -->
@@ -170,10 +170,10 @@
                     <TextBlock x:Name="TxtFrequency" Style="{StaticResource ValueText}" Text="0"/>
                     <TextBlock Style="{StaticResource HeaderText}" Text="  最大頻度 (回/秒):" Margin="16,0,4,0"/>
                     <TextBlock x:Name="TxtMaxFrequency" Style="{StaticResource ValueText}" Text="0"/>
-                    <TextBlock Style="{StaticResource HeaderText}" Text="  Dispatch待ち:" Margin="16,0,4,0"
-                               ToolTip="UIスレッドへのディスパッチ待ちログ件数&#x0a;増加している場合はキューが詰まっています（50件超でキュー警告ログを出力）"/>
-                    <TextBlock x:Name="TxtPendingDispatch" Style="{StaticResource ValueText}" Text="0"
-                               ToolTip="UIスレッドへのディスパッチ待ちログ件数"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  直近/最大遅延(ms):" Margin="16,0,4,0"
+                               ToolTip="WinEvent が生成されてから監視側コールバックへ届くまでの遅延&#x0a;値が大きいほど監視対象側または配送経路の停滞の疑い"/>
+                    <TextBlock x:Name="TxtEventLag" Style="{StaticResource ValueText}" Text="0 / 0"
+                               ToolTip="直近遅延 / 最大遅延 (ms)"/>
                     <TextBlock x:Name="TxtWarning" Style="{StaticResource WarnText}"
                                Text="" Margin="16,0,0,0" Visibility="Collapsed"/>
                     <Button x:Name="BtnResetStats" Content="統計リセット" Padding="8,2"

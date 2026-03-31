@@ -14,16 +14,15 @@ namespace MessageHookTool;
 public partial class MainWindow : Window
 {
     // ─── Win32 ───────────────────────────────────────────────
-    private const uint EVENT_OBJECT_CREATE        = 0x8000;
-    private const uint EVENT_OBJECT_DESTROY       = 0x8001;
-    private const uint EVENT_OBJECT_SHOW          = 0x8002;
+    private const uint EVENT_OBJECT_CREATE         = 0x8000;
+    private const uint EVENT_OBJECT_DESTROY        = 0x8001;
+    private const uint EVENT_OBJECT_SHOW           = 0x8002;
     private const uint EVENT_OBJECT_HIDE          = 0x8003;
     private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
-    private const uint EVENT_SYSTEM_FOREGROUND    = 0x0003;
+    private const uint EVENT_SYSTEM_FOREGROUND     = 0x0003;
     private const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A;
     private const uint EVENT_SYSTEM_MOVESIZEEND   = 0x000B;
     private const uint WINEVENT_OUTOFCONTEXT       = 0x0000;
-    private const uint QS_ALLINPUT                 = 0x04FF;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -45,9 +44,6 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetQueueStatus(uint flags);
 
     private delegate void WinEventDelegate(
         IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
@@ -80,10 +76,11 @@ public partial class MainWindow : Window
 
     private const uint WM_QUIT = 0x0012;
 
-    private const int WindowTextCapacity = 256;
+    private const int WindowTextCapacity     = 256;
+    private const int LagWarningThresholdMs = 100;
 
     // ─── ログ種別 ─────────────────────────────────────────────
-    private enum LogType { System, LocationChange, WindowEvent, QueueStatus }
+    private enum LogType { System, LocationChange, WindowEvent, DelayWarning }
     private record LogEntry(DateTime Timestamp, string Message, bool IsWarning = false, LogType Type = LogType.System);
 
     // ─── フィールド ───────────────────────────────────────────
@@ -99,19 +96,21 @@ public partial class MainWindow : Window
     private int           _totalCount       = 0;
     private volatile int  _currentFrequency = 0;
     private volatile int  _maxFrequency     = 0;
+    private volatile int  _latestEventLagMs = 0;
+    private volatile int  _maxEventLagMs    = 0;
     private long          _windowStartTicks = DateTime.Now.Ticks;
     private volatile bool _warnActive       = false;
+    private volatile bool _lagWarnActive    = false;
     private volatile int  _threshold        = 100;
 
-    // キュー溜まり監視（読み取りは Volatile.Read、書き込みは Interlocked で保護）
-    private int  _pendingDispatchCount = 0;
-    private long _lastQueueWarnTicks   = 0;   // 警告スロットル（フックスレッド専用）
+    // 遅延警告スロットル（フックスレッド専用）
+    private long _lastLagWarnTicks = 0;
 
     // フィルタ状態（UIスレッドのみ）
     private bool _filterSystem         = true;
     private bool _filterLocationChange = true;
     private bool _filterWindowEvent    = true;
-    private bool _filterQueueStatus    = true;
+    private bool _filterDelayWarning   = true;
 
     private List<ProcessEntry> _allProcesses = new();
     private readonly DispatcherTimer _statusTimer;
@@ -220,6 +219,7 @@ public partial class MainWindow : Window
         // 処理ラグ（dwmsEventTime は GetTickCount と同単位: システム起動からのミリ秒）
         var lagMs = unchecked((int)((uint)Environment.TickCount - dwmsEventTime));
         if (lagMs < 0) lagMs = 0;
+        UpdateLagStatsAndWarn(GetEventName(eventType), hwnd, lagMs);
 
         if (eventType == EVENT_OBJECT_LOCATIONCHANGE)
         {
@@ -238,18 +238,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        // その他のイベント
-        string evName = eventType switch
-        {
-            EVENT_OBJECT_CREATE        => "OBJECT_CREATE",
-            EVENT_OBJECT_DESTROY       => "OBJECT_DESTROY",
-            EVENT_OBJECT_SHOW          => "OBJECT_SHOW",
-            EVENT_OBJECT_HIDE          => "OBJECT_HIDE",
-            EVENT_SYSTEM_FOREGROUND    => "SYSTEM_FOREGROUND",
-            EVENT_SYSTEM_MOVESIZESTART => "SYSTEM_MOVESIZESTART",
-            EVENT_SYSTEM_MOVESIZEEND   => "SYSTEM_MOVESIZEEND",
-            _                          => $"EVENT_0x{eventType:X4}",
-        };
+        string evName = GetEventName(eventType);
 
         if (eventType == EVENT_OBJECT_DESTROY)
         {
@@ -272,17 +261,10 @@ public partial class MainWindow : Window
     {
         var entry = new LogEntry(DateTime.Now, message, isWarning, type);
         if (!Dispatcher.HasShutdownStarted)
-        {
-            Interlocked.Increment(ref _pendingDispatchCount);
-            Dispatcher.InvokeAsync(() =>
-            {
-                Interlocked.Decrement(ref _pendingDispatchCount);
-                AppendLogEntry(entry);
-            });
-        }
+            Dispatcher.InvokeAsync(() => AppendLogEntry(entry));
     }
 
-    // ─── 頻度カウント + キュー状態チェック（フックスレッドから呼ばれる） ───
+    // ─── 頻度カウント（フックスレッドから呼ばれる） ───
     private void CountAndWarn()
     {
         _countInWindow++;
@@ -290,20 +272,6 @@ public partial class MainWindow : Window
 
         var nowTicks = DateTime.Now.Ticks;
         var elapsed  = TimeSpan.FromTicks(nowTicks - Interlocked.Read(ref _windowStartTicks)).TotalSeconds;
-
-        var pending = Volatile.Read(ref _pendingDispatchCount);
-        if (pending > 50 && TimeSpan.FromTicks(nowTicks - _lastQueueWarnTicks).TotalSeconds >= 1.0)
-        {
-            _lastQueueWarnTicks = nowTicks;
-            var liveFreq = elapsed > 0 ? (int)(_countInWindow / elapsed) : _currentFrequency;
-            var qs    = GetQueueStatus(QS_ALLINPUT);
-            var qsNow = (int)(qs & 0xFFFF);
-            var qsNew = (int)((qs >> 16) & 0xFFFF);
-            PostLogEntry(
-                $"[{Now}] [キュー警告] UIディスパッチ待ち={pending}件  " +
-                $"Win32キュー種別=0x{qsNow:X4}(新着=0x{qsNew:X4})  LOCATIONCHANGE頻度={liveFreq}回/秒",
-                LogType.QueueStatus, isWarning: true);
-        }
         if (elapsed >= 1.0)
         {
             var freq = (int)(_countInWindow / elapsed);
@@ -315,6 +283,39 @@ public partial class MainWindow : Window
             Interlocked.Exchange(ref _windowStartTicks, nowTicks);
         }
     }
+
+    private void UpdateLagStatsAndWarn(string eventName, IntPtr hwnd, int lagMs)
+    {
+        _latestEventLagMs = lagMs;
+        if (lagMs > _maxEventLagMs)
+            _maxEventLagMs = lagMs;
+
+        _lagWarnActive = lagMs >= LagWarningThresholdMs;
+        if (!_lagWarnActive)
+            return;
+
+        var nowTicks = DateTime.Now.Ticks;
+        if (TimeSpan.FromTicks(nowTicks - _lastLagWarnTicks).TotalSeconds < 1.0)
+            return;
+
+        _lastLagWarnTicks = nowTicks;
+        PostLogEntry(
+            $"[{Now}] [遅延警告] {eventName}  hwnd=0x{hwnd:X8}  lag={lagMs}ms",
+            LogType.DelayWarning, isWarning: true);
+    }
+
+    private static string GetEventName(uint eventType) => eventType switch
+    {
+        EVENT_OBJECT_CREATE        => "OBJECT_CREATE",
+        EVENT_OBJECT_DESTROY       => "OBJECT_DESTROY",
+        EVENT_OBJECT_SHOW          => "OBJECT_SHOW",
+        EVENT_OBJECT_HIDE          => "OBJECT_HIDE",
+        EVENT_OBJECT_LOCATIONCHANGE => "EVENT_OBJECT_LOCATIONCHANGE",
+        EVENT_SYSTEM_FOREGROUND    => "SYSTEM_FOREGROUND",
+        EVENT_SYSTEM_MOVESIZESTART => "SYSTEM_MOVESIZESTART",
+        EVENT_SYSTEM_MOVESIZEEND   => "SYSTEM_MOVESIZEEND",
+        _                          => $"EVENT_0x{eventType:X4}",
+    };
 
     // ─── プロセス一覧 ─────────────────────────────────────────
     private void LoadProcessList(string filter = "")
@@ -459,14 +460,32 @@ public partial class MainWindow : Window
         TxtRdp.Text     = System.Windows.Forms.SystemInformation.TerminalServerSession ? "YES" : "NO";
         TxtDwm.Text     = DiagnosticsLogger.GetDwmEnabled() ? "ON" : "OFF";
 
-        TxtTotalCount.Text      = Volatile.Read(ref _totalCount).ToString();
-        TxtFrequency.Text       = _currentFrequency.ToString();
-        TxtMaxFrequency.Text    = _maxFrequency.ToString();
-        TxtPendingDispatch.Text = Volatile.Read(ref _pendingDispatchCount).ToString();
+        var latestLagMs = _latestEventLagMs;
+        var maxLagMs    = _maxEventLagMs;
 
-        TxtWarning.Visibility = _warnActive ? Visibility.Visible : Visibility.Collapsed;
-        if (_warnActive)
+        TxtTotalCount.Text   = Volatile.Read(ref _totalCount).ToString();
+        TxtFrequency.Text    = _currentFrequency.ToString();
+        TxtMaxFrequency.Text = _maxFrequency.ToString();
+        TxtEventLag.Text     = $"{latestLagMs} / {maxLagMs}";
+
+        TxtWarning.Visibility = (_warnActive || _lagWarnActive) ? Visibility.Visible : Visibility.Collapsed;
+        if (_warnActive && _lagWarnActive)
+        {
+            TxtWarning.Text =
+                $"警告: 頻度超過 ({_currentFrequency} 回/秒) / 遅延 {latestLagMs} ms";
+        }
+        else if (_lagWarnActive)
+        {
+            TxtWarning.Text = $"警告: イベント遅延 {latestLagMs} ms";
+        }
+        else if (_warnActive)
+        {
             TxtWarning.Text = $"警告: 頻度超過 ({_currentFrequency} 回/秒)";
+        }
+        else
+        {
+            TxtWarning.Text = "";
+        }
     }
 
     // ─── ログ ─────────────────────────────────────────────────
@@ -479,7 +498,7 @@ public partial class MainWindow : Window
             Content    = entry.Message,
             Foreground = entry.Type switch
             {
-                LogType.QueueStatus    => WpfBrushes.OrangeRed,
+                LogType.DelayWarning   => WpfBrushes.OrangeRed,
                 LogType.WindowEvent    => WpfBrushes.DodgerBlue,
                 LogType.LocationChange => entry.IsWarning ? WpfBrushes.OrangeRed : WpfBrushes.Black,
                 _                     => WpfBrushes.Gray,
@@ -509,7 +528,7 @@ public partial class MainWindow : Window
         LogType.System         => _filterSystem,
         LogType.LocationChange => _filterLocationChange,
         LogType.WindowEvent    => _filterWindowEvent,
-        LogType.QueueStatus    => _filterQueueStatus,
+        LogType.DelayWarning   => _filterDelayWarning,
         _ => true
     };
 
@@ -527,7 +546,7 @@ public partial class MainWindow : Window
         _filterSystem         = ChkFilterSystem.IsChecked         == true;
         _filterLocationChange = ChkFilterLocationChange.IsChecked == true;
         _filterWindowEvent    = ChkFilterWindowEvent.IsChecked    == true;
-        _filterQueueStatus    = ChkFilterQueueStatus.IsChecked    == true;
+        _filterDelayWarning   = ChkFilterDelayWarning.IsChecked   == true;
         ApplyLogFilter();
     }
 
@@ -548,8 +567,11 @@ public partial class MainWindow : Window
     {
         Interlocked.Exchange(ref _totalCount, 0);
         _countInWindow = _currentFrequency = _maxFrequency = 0;
+        _latestEventLagMs = _maxEventLagMs = 0;
         Interlocked.Exchange(ref _windowStartTicks, DateTime.Now.Ticks);
-        _warnActive = false;
+        _warnActive       = false;
+        _lagWarnActive    = false;
+        _lastLagWarnTicks = 0;
     }
 
     private void BtnExportLog_Click(object sender, RoutedEventArgs e)
