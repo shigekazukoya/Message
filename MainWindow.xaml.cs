@@ -75,6 +75,7 @@ public partial class MainWindow : Window
     private WinEventDelegate? _winEventProc; // GC 収集防止のためインスタンスフィールドで保持
 
     private bool _monitoring = false;
+    private int  _targetPid  = 0;
 
     // 頻度監視（フックスレッド・UIスレッド両方からアクセスするため Interlocked / volatile で保護）
     private int           _countInWindow    = 0;
@@ -166,6 +167,7 @@ public partial class MainWindow : Window
         }
 
         _monitoring = true;
+        _targetPid  = pid;
         AppendLog($"[{Now}] 監視開始  PID={pid}");
         UpdateMonitorUI(true);
     }
@@ -181,6 +183,7 @@ public partial class MainWindow : Window
             _hookThread   = null;
         }
         _monitoring = false;
+        _targetPid  = 0;
         AppendLog($"[{Now}] 監視停止");
         UpdateMonitorUI(false);
     }
@@ -345,13 +348,32 @@ public partial class MainWindow : Window
     // ─── ステータスバー ───────────────────────────────────────
     private void UpdateStatusBar(object? sender, EventArgs e)
     {
-        using var proc = Process.GetCurrentProcess();
-        proc.Refresh();
-
-        TxtGdi.Text     = DiagnosticsLogger.GetGuiResources(proc.Handle, 0).ToString();
-        TxtUser.Text    = DiagnosticsLogger.GetGuiResources(proc.Handle, 1).ToString();
-        TxtHandles.Text = proc.HandleCount.ToString();
-        TxtWS.Text      = $"{proc.WorkingSet64 / 1024 / 1024} MB";
+        if (_targetPid != 0)
+        {
+            try
+            {
+                using var target = Process.GetProcessById(_targetPid);
+                target.Refresh();
+                TxtGdi.Text     = DiagnosticsLogger.GetGuiResources(target.Handle, 0).ToString();
+                TxtUser.Text    = DiagnosticsLogger.GetGuiResources(target.Handle, 1).ToString();
+                TxtHandles.Text = target.HandleCount.ToString();
+                TxtWS.Text      = $"{target.WorkingSet64 / 1024 / 1024} MB";
+            }
+            catch
+            {
+                TxtGdi.Text     = "-";
+                TxtUser.Text    = "-";
+                TxtHandles.Text = "-";
+                TxtWS.Text      = "-";
+            }
+        }
+        else
+        {
+            TxtGdi.Text     = "-";
+            TxtUser.Text    = "-";
+            TxtHandles.Text = "-";
+            TxtWS.Text      = "-";
+        }
         TxtRdp.Text     = System.Windows.Forms.SystemInformation.TerminalServerSession ? "YES" : "NO";
         TxtDwm.Text     = DiagnosticsLogger.GetDwmEnabled() ? "ON" : "OFF";
 
