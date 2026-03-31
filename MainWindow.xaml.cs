@@ -73,8 +73,9 @@ public partial class MainWindow : Window
     private const uint WM_QUIT = 0x0012;
 
     // ─── フィールド ───────────────────────────────────────────
-    private Thread?  _hookThread;
-    private uint     _hookThreadId;
+    private Thread?           _hookThread;
+    private uint              _hookThreadId;
+    private WinEventDelegate? _winEventProc; // GC 収集防止のためインスタンスフィールドで保持
 
     private bool _monitoring = false;
 
@@ -110,17 +111,17 @@ public partial class MainWindow : Window
         var ready = new ManualResetEventSlim(false);
         bool hookOk = false;
 
+        // インスタンスフィールドに保持して GC 収集を防ぐ
+        _winEventProc = OnWinEvent;
+
         _hookThread = new Thread(() =>
         {
             // このスレッドの Win32 スレッド ID を記録
             _hookThreadId = GetCurrentThreadId();
 
-            // デリゲートをローカルに保持（GC 対策）
-            WinEventDelegate proc = OnWinEvent;
-
             var hook = SetWinEventHook(
                 EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
-                IntPtr.Zero, proc,
+                IntPtr.Zero, _winEventProc,
                 (uint)pid, 0, WINEVENT_OUTOFCONTEXT);
 
             hookOk = hook != IntPtr.Zero;
@@ -192,7 +193,8 @@ public partial class MainWindow : Window
             $"pid={pid}  title=\"{title}\"",
             _warnActive
         );
-        Dispatcher.InvokeAsync(() => AppendLogEntry(entry));
+        if (!Dispatcher.HasShutdownStarted)
+            Dispatcher.InvokeAsync(() => AppendLogEntry(entry));
     }
 
     // ─── 頻度カウント（フックスレッドから呼ばれる） ──────────
