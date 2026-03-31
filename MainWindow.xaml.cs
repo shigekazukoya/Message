@@ -104,7 +104,8 @@ public partial class MainWindow : Window
     private volatile int  _threshold        = 100;
 
     // キュー溜まり監視（読み取りは Volatile.Read、書き込みは Interlocked で保護）
-    private int _pendingDispatchCount = 0;
+    private int  _pendingDispatchCount = 0;
+    private long _lastQueueWarnTicks   = 0;   // 警告スロットル（フックスレッド専用）
 
     // フィルタ状態（UIスレッドのみ）
     private bool _filterSystem         = true;
@@ -287,7 +288,22 @@ public partial class MainWindow : Window
         _countInWindow++;
         Interlocked.Increment(ref _totalCount);
 
-        var elapsed = TimeSpan.FromTicks(DateTime.Now.Ticks - Interlocked.Read(ref _windowStartTicks)).TotalSeconds;
+        var nowTicks = DateTime.Now.Ticks;
+        var elapsed  = TimeSpan.FromTicks(nowTicks - Interlocked.Read(ref _windowStartTicks)).TotalSeconds;
+
+        var pending = Volatile.Read(ref _pendingDispatchCount);
+        if (pending > 50 && TimeSpan.FromTicks(nowTicks - _lastQueueWarnTicks).TotalSeconds >= 1.0)
+        {
+            _lastQueueWarnTicks = nowTicks;
+            var liveFreq = elapsed > 0 ? (int)(_countInWindow / elapsed) : _currentFrequency;
+            var qs    = GetQueueStatus(QS_ALLINPUT);
+            var qsNow = (int)(qs & 0xFFFF);
+            var qsNew = (int)((qs >> 16) & 0xFFFF);
+            PostLogEntry(
+                $"[{Now}] [キュー警告] UIディスパッチ待ち={pending}件  " +
+                $"Win32キュー種別=0x{qsNow:X4}(新着=0x{qsNew:X4})  LOCATIONCHANGE頻度={liveFreq}回/秒",
+                LogType.QueueStatus, isWarning: true);
+        }
         if (elapsed >= 1.0)
         {
             var freq = (int)(_countInWindow / elapsed);
@@ -296,21 +312,7 @@ public partial class MainWindow : Window
                 _maxFrequency = freq;
             _warnActive    = freq > _threshold;
             _countInWindow = 0;
-            Interlocked.Exchange(ref _windowStartTicks, DateTime.Now.Ticks);
-
-            // UIディスパッチキューの滞留チェック
-            var pending = Volatile.Read(ref _pendingDispatchCount);
-            if (pending > 50)
-            {
-                // フックスレッド自身の Win32 キュー状態も取得
-                var qs    = GetQueueStatus(QS_ALLINPUT);
-                var qsNow = (int)(qs & 0xFFFF);          // 現在キューにある種別フラグ
-                var qsNew = (int)((qs >> 16) & 0xFFFF);  // 新着種別フラグ
-                PostLogEntry(
-                    $"[{Now}] [キュー警告] UIディスパッチ待ち={pending}件  " +
-                    $"Win32キュー種別=0x{qsNow:X4}(新着=0x{qsNew:X4})  LOCATIONCHANGE頻度={freq}回/秒",
-                    LogType.QueueStatus, isWarning: true);
-            }
+            Interlocked.Exchange(ref _windowStartTicks, nowTicks);
         }
     }
 
