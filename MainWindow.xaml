@@ -22,7 +22,7 @@
 
     <DockPanel LastChildFill="True">
 
-        <!-- ツールバー -->
+        <!-- メインツールバー -->
         <ToolBar DockPanel.Dock="Top" Margin="2">
             <Button x:Name="BtnClearLog" Content="ログをクリア" Padding="8,3" Margin="2,0"
                     Click="BtnClearLog_Click"/>
@@ -39,6 +39,32 @@
             <TextBox x:Name="TxtThreshold" Text="100" Width="50" Margin="2,0"
                      VerticalContentAlignment="Center"
                      TextChanged="TxtThreshold_TextChanged"/>
+        </ToolBar>
+
+        <!-- ログフィルタツールバー -->
+        <ToolBar DockPanel.Dock="Top" Margin="2">
+            <TextBlock Text="ログフィルタ:" VerticalAlignment="Center" Margin="4,0" FontWeight="Bold"/>
+            <Separator/>
+            <CheckBox x:Name="ChkFilterSystem"
+                      Content="システム" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"
+                      Click="ChkFilter_Click"
+                      ToolTip="監視開始/停止・エラーなどのシステムメッセージ（灰色）"/>
+            <CheckBox x:Name="ChkFilterLocationChange"
+                      Content="LocationChange" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"
+                      Click="ChkFilter_Click"
+                      ToolTip="EVENT_OBJECT_LOCATIONCHANGE（黒／頻度超過時はオレンジ）"/>
+            <CheckBox x:Name="ChkFilterWindowEvent"
+                      Content="ウィンドウイベント" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"
+                      Click="ChkFilter_Click"
+                      ToolTip="OBJECT_CREATE/DESTROY/SHOW/HIDE, SYSTEM_FOREGROUND, MOVESIZE など（青）"/>
+            <CheckBox x:Name="ChkFilterQueueStatus"
+                      Content="キュー状態" IsChecked="True"
+                      VerticalAlignment="Center" Margin="4,0"
+                      Click="ChkFilter_Click"
+                      ToolTip="UIディスパッチ待ちが50件を超えたときの警告（オレンジ太字）"/>
         </ToolBar>
 
         <!-- ステータスバー -->
@@ -144,6 +170,10 @@
                     <TextBlock x:Name="TxtFrequency" Style="{StaticResource ValueText}" Text="0"/>
                     <TextBlock Style="{StaticResource HeaderText}" Text="  最大頻度 (回/秒):" Margin="16,0,4,0"/>
                     <TextBlock x:Name="TxtMaxFrequency" Style="{StaticResource ValueText}" Text="0"/>
+                    <TextBlock Style="{StaticResource HeaderText}" Text="  Dispatch待ち:" Margin="16,0,4,0"
+                               ToolTip="UIスレッドへのディスパッチ待ちログ件数&#x0a;増加している場合はキューが詰まっています（50件超でキュー警告ログを出力）"/>
+                    <TextBlock x:Name="TxtPendingDispatch" Style="{StaticResource ValueText}" Text="0"
+                               ToolTip="UIスレッドへのディスパッチ待ちログ件数"/>
                     <TextBlock x:Name="TxtWarning" Style="{StaticResource WarnText}"
                                Text="" Margin="16,0,0,0" Visibility="Collapsed"/>
                     <Button x:Name="BtnResetStats" Content="統計リセット" Padding="8,2"
